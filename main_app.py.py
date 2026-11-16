@@ -65,7 +65,7 @@ def extract_text_from_pdf(uploaded_file) -> str:
     return "".join(page.get_text() for page in doc)
 
 def generate_quiz(api_key: str, content: str, num_questions: int, difficulty: str) -> dict:
-    client = genai.Client(api_key=api_key)
+    client = genai.Client(api_key=api_key.strip())
     prompt = f"""
     Create a {difficulty}-difficulty multiple-choice quiz with exactly {num_questions} questions 
     based strictly on the following study notes. Each question must have 4 options, 
@@ -74,16 +74,23 @@ def generate_quiz(api_key: str, content: str, num_questions: int, difficulty: st
     NOTES:
     {content[:25000]} 
     """
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=Quiz,
-            temperature=0.3,
-        ),
-    )
-    return json.loads(response.text)
+    last_error = "Unknown error"
+    for model_name in ["gemini-2.5-flash", "gemini-2.0-flash"]:
+        try:
+            response = client.models.generate_content(
+                model=model_name,
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=Quiz,
+                    temperature=0.3,
+                ),
+            )
+            return json.loads(response.text)
+        except Exception as e:
+            last_error = str(e)
+            continue
+    raise RuntimeError(f"Gemini API Error: {last_error}")
 
 def generate_certificate_pdf(student_name: str, topic: str, score: int, total: int, percentage: float, cert_id: str, date_str: str) -> BytesIO:
     buffer = BytesIO()
@@ -170,12 +177,13 @@ for key, default in {
 
 st.title("🎓 AI Notes-to-Quiz & Certificate Portal")
 
-default_api_key = st.secrets.get("GEMINI_API_KEY", "") if hasattr(st, "secrets") else ""
+# Load API key silently from Streamlit Secrets (hidden from students)
+api_key = st.secrets.get("GEMINI_API_KEY", "") if hasattr(st, "secrets") else ""
 
 with st.sidebar:
-    st.header("Settings")
-    api_key = st.text_input("Gemini API Key", value=default_api_key, type="password")
-    if st.button("Start New Quiz"):
+    st.header("Quiz Controls")
+    st.write("Need to restart or try another topic?")
+    if st.button("🔄 Start New Quiz", use_container_width=True):
         for key in ["stage", "quiz_data", "start_time", "time_limit", "user_answers", "issued_cert"]:
             st.session_state[key] = None if key in ["quiz_data", "issued_cert"] else ({} if key == "user_answers" else ("setup" if key == "stage" else 0))
         st.rerun()
@@ -205,7 +213,7 @@ with main_tab1:
 
         if st.button("Generate Timed Quiz", type="primary", use_container_width=True):
             if not api_key:
-                st.error("Please enter your Gemini API Key in the sidebar.")
+                st.error("System setup incomplete: GEMINI_API_KEY is missing from Streamlit Secrets.")
             elif not student_name.strip():
                 st.error("Please enter your name for the certificate.")
             else:
@@ -213,15 +221,18 @@ with main_tab1:
                 if len(raw_text.strip()) < 100:
                     st.error("Please provide at least a paragraph of notes or a readable PDF.")
                 else:
-                    with st.spinner("Analyzing notes and crafting questions..."):
-                        st.session_state.quiz_data = generate_quiz(api_key, raw_text, num_q, difficulty)
-                        st.session_state.student_name = student_name.strip()
-                        st.session_state.time_limit = mins * 60
-                        st.session_state.start_time = time.time()
-                        st.session_state.user_answers = {}
-                        st.session_state.issued_cert = None
-                        st.session_state.stage = "quiz"
-                        st.rerun()
+                    try:
+                        with st.spinner("Analyzing notes and crafting questions..."):
+                            st.session_state.quiz_data = generate_quiz(api_key, raw_text, num_q, difficulty)
+                            st.session_state.student_name = student_name.strip()
+                            st.session_state.time_limit = mins * 60
+                            st.session_state.start_time = time.time()
+                            st.session_state.user_answers = {}
+                            st.session_state.issued_cert = None
+                            st.session_state.stage = "quiz"
+                            st.rerun()
+                    except Exception as e:
+                        st.error(f"Could not generate quiz: {e}")
 
     elif st.session_state.stage == "quiz":
         quiz = st.session_state.quiz_data
